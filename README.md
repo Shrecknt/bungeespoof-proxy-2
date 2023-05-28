@@ -4,7 +4,7 @@ Based on [serverscanning/bungeespoof-proxy](https://github.com/serverscanning/bu
 
 Allows you to connect to a bungeecoord backend server without using the intended bungeecoord proxy
 
-I made this because the original bungeespoof proxy didn't work correctly when connecting to backend servers on versions other than 1.19.4, and it had an unnecessarily large number of unnecessary dependencies making compile times extremely long. I ended up deciding that it would be easier to re-implement the whole thing from the ground up instead of modifying the original.
+I made this because the original bungeespoof proxy didn't work correctly when connecting to backend servers on versions other than 1.19.4, and it had a large number of unnecessary dependencies making compile times extremely long. I ended up deciding that it would be easier to re-implement the whole thing from the ground up instead of modifying the original.
 
 ---
 
