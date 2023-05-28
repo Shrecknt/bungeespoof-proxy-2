@@ -94,11 +94,26 @@ async fn handle_login(
             send_packet.write_all(custom_playername).await?;
             if protocol_version == 759 || protocol_version == 760 {
                 let has_sig_data = client.read_u8().await?;
-                if has_sig_data != 0x00 {
-                    // i dont feel like handling sig data, so ill throw an error instead :3
-                    panic!("has_sig_data is not 0x00 (got {has_sig_data:x?}) are you sure you have NCR enabled?");
+                if has_sig_data == 0x00 {
+                    send_packet.write_u8(0x00).await?;
+                } else if has_sig_data == 0x01 {
+                    let timestamp = client.read_i64().await?;
+                    let (_, public_key_len) = read_varint_len(client).await?;
+                    let mut public_key = vec![0; public_key_len.try_into().unwrap()];
+                    client.read_exact(&mut public_key).await?;
+                    let (_, signature_len) = read_varint_len(client).await?;
+                    let mut signature = vec![0; signature_len.try_into().unwrap()];
+                    client.read_exact(&mut signature).await?;
+
+                    send_packet.write_i64(timestamp).await?;
+                    write_varint(&mut send_packet, public_key_len).await?;
+                    send_packet.append(&mut public_key);
+                    write_varint(&mut send_packet, signature_len).await?;
+                    send_packet.append(&mut signature);
+                } else {
+                    println!("Bad has_sig_data {has_sig_data}");
+                    unreachable!();
                 }
-                send_packet.write_u8(0x00).await?;
             }
             if protocol_version >= 759 {
                 let has_uuid = client.read_u8().await?;
@@ -110,10 +125,13 @@ async fn handle_login(
             send_prefixed_packet(server, &send_packet).await?;
             println!("Successfully spoofed login");
         } else {
-            unreachable!("Bad next state {next_state}");
+            println!("Bad next state {next_state}");
+            unreachable!();
         }
     } else if packet_len == 254 && packet_id == 0xFA {
         // legacy ping
+        let send_buf: Vec<u8> = vec![0xFE, 0x01, 0xFA];
+        server.write_all(&send_buf).await?;
     } else {
         // something weird happened
         // lets pretend everything is cool and normal (:
