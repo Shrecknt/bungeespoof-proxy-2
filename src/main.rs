@@ -108,6 +108,7 @@ async fn handle_login(
                 }
             }
             send_prefixed_packet(server, &send_packet).await?;
+            println!("Successfully spoofed login");
         } else {
             unreachable!("Bad next state {next_state}");
         }
@@ -154,7 +155,7 @@ async fn proxy(
         .await
         {
             Ok(()) => {
-                println!("Successfully spoofed login");
+                println!("Connection succeeded without error");
             }
             Err(err) => {
                 println!("Login failed");
