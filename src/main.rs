@@ -9,7 +9,7 @@ use resolve_address::resolve_address;
 
 use clap::Parser;
 use serde_json::Value;
-use std::{error::Error, str::FromStr};
+use std::{error::Error, fmt::Debug, str::FromStr};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -17,13 +17,28 @@ use tokio::{
 };
 use uuid::Uuid;
 
+async fn get_player_profile(uuid: &str) -> Result<String, Box<dyn Error>> {
+    const MOJANG_PROFILE_API: &str = "https://sessionserver.mojang.com/session/minecraft/profile/";
+    let request_url = format!("{}{}?unsigned=false", MOJANG_PROFILE_API, uuid);
+
+    let text = reqwest::get(request_url).await?.text().await?;
+    let json: Value = serde_json::from_str(&text)?;
+
+    match json["properties"].as_array() {
+        Some(value) => Ok(serde_json::to_string(value)?),
+        None => Err("Could not find properties value in API response".into()),
+    }
+}
+
 async fn handle_login(
     client: &mut TcpStream,
     server: &mut TcpStream,
     username: &str,
     uuid: &str,
+    player_profile: &str,
     spoofed_hostname: &str,
     spoofed_client_ip: &str,
+    debug: bool,
 ) -> Result<(), Box<dyn Error>> {
     let uuid = Uuid::from_str(uuid)?;
     let player_uuid = &uuid.to_string().replace('-', "");
@@ -35,6 +50,11 @@ async fn handle_login(
     let (_, packet_id) = read_varint_len(client).await?;
     if packet_id == 0x00 {
         // handshake
+
+        if debug {
+            println!("[Debug] received serverbound handshake packet");
+        }
+
         let (_, protocol_version) = read_varint_len(client).await?;
         let (_, hostname_len) = read_varint_len(client).await?;
         let mut hostname = vec![0; hostname_len.try_into().unwrap()];
@@ -44,26 +64,44 @@ async fn handle_login(
 
         if next_state == 1 {
             // status
+
+            if debug {
+                println!("[Debug] next_state = 1 (status)");
+            }
+
             let mut send_packet = vec![];
             write_varint(&mut send_packet, packet_id).await?;
             write_varint(&mut send_packet, protocol_version).await?;
             write_varint(&mut send_packet, hostname_len).await?;
-            send_packet.append(&mut hostname);
+            send_packet.append(&mut hostname.clone());
             send_packet.write_u16(port).await?;
             write_varint(&mut send_packet, next_state).await?;
+
+            if debug {
+                println!("[Debug] sending handshake packet {send_packet:X?}");
+            }
+
             send_prefixed_packet(server, &send_packet).await?;
         } else if next_state == 2 {
             // login
+
+            if debug {
+                println!("[Debug] next_state = 2 (login)");
+            }
 
             // handshake segment
             let mut send_packet: Vec<u8> = vec![];
             write_varint(&mut send_packet, packet_id).await?;
             write_varint(&mut send_packet, protocol_version).await?;
 
-            let custom_hostname = format!(
+            let mut custom_hostname = format!(
                 "{}\0{}\0{}",
                 spoofed_hostname, spoofed_client_ip, player_uuid
             );
+            if player_profile != "" {
+                custom_hostname = format!("{}\0{}", custom_hostname, player_profile);
+            }
+
             let custom_hostname_bytes = custom_hostname.as_bytes();
             write_varint(
                 &mut send_packet,
@@ -74,6 +112,20 @@ async fn handle_login(
 
             send_packet.write_u16(port).await?;
             write_varint(&mut send_packet, next_state).await?;
+
+            if debug {
+                let mut original_packet: Vec<u8> = vec![];
+                write_varint(&mut original_packet, packet_id).await?;
+                write_varint(&mut original_packet, protocol_version).await?;
+                write_varint(&mut original_packet, hostname_len).await?;
+                original_packet.append(&mut hostname.clone());
+                original_packet.write_u16(port).await?;
+                write_varint(&mut original_packet, next_state).await?;
+
+                println!("[Debug] original packet {original_packet:X?}");
+                println!("[Debug] sending handshake packet {send_packet:X?}");
+            }
+
             send_prefixed_packet(server, &send_packet).await?;
 
             // login start segment
@@ -122,6 +174,11 @@ async fn handle_login(
                     send_packet.write_all(uuid.as_bytes()).await?;
                 }
             }
+
+            if debug {
+                println!("[Debug] sending login packet {send_packet:X?}");
+            }
+
             send_prefixed_packet(server, &send_packet).await?;
             println!("Successfully spoofed login");
         } else {
@@ -140,6 +197,11 @@ async fn handle_login(
         let mut remaining_buf: Vec<u8> = vec![0; usize::try_from(packet_len).unwrap()];
         client.read_exact(&mut send_buf).await?;
         send_buf.append(&mut remaining_buf);
+
+        if debug {
+            println!("[Debug] sending strange packet {send_buf:X?}");
+        }
+
         send_prefixed_packet(server, &send_buf).await?;
     }
 
@@ -151,8 +213,10 @@ async fn proxy(
     server: &str,
     username: &str,
     uuid: &str,
+    player_profile: &str,
     spoofed_hostname: &str,
     spoofed_client_ip: &str,
+    debug: bool,
 ) -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(client).await?;
     println!("Listening on interface {client}, proxied to {server}");
@@ -167,8 +231,10 @@ async fn proxy(
             &mut server,
             username,
             uuid,
+            player_profile,
             spoofed_hostname,
             spoofed_client_ip,
+            debug,
         )
         .await
         {
@@ -188,8 +254,8 @@ async fn proxy(
         let s2c = tokio::spawn(async move { io::copy(&mut server_read, &mut client_write).await });
 
         select! {
-            _ = c2s => println!("C2S done!"),
-            _ = s2c => println!("S2C done!"),
+            _ = c2s => println!("The client closed the connection"),
+            _ = s2c => println!("The server closed the connection"),
         }
     }
 }
@@ -220,6 +286,9 @@ struct Args {
     /// Client IP to send to server
     #[arg(long, default_value_t = String::from("192.168.0.1"))]
     client_ip: String,
+
+    #[arg(short = 'D', long, default_value_t = false)]
+    debug: bool,
 }
 
 #[tokio::main]
@@ -246,6 +315,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         args.uuid
     };
 
+    let player_profile = get_player_profile(&uuid).await?;
+    if args.debug {
+        println!("[Debug] player profile: {player_profile}");
+    }
+
     let listen_address = ServerAddress::try_from(args.listen.as_str())?;
     let mut host_address = ServerAddress::try_from(args.hostname.as_str())?;
     host_address = resolve_address(&host_address).await?;
@@ -255,8 +329,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &format!("{}:{}", host_address.host, host_address.port),
         &args.username,
         &uuid,
+        &player_profile,
         &args.send_hostname,
         &args.client_ip,
+        args.debug,
     )
     .await
 }
